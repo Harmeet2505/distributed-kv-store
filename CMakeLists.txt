@@ -15,6 +15,7 @@ add_executable(kvstore
     src/main.cpp
     src/store/kv_store.cpp
     src/network/server.cpp
+    src/persistence/wal.cpp
 )
 
 # Link the threading library

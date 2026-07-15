@@ -5,7 +5,7 @@
 
 
 int main(){
-    KVStore store("../data/wal.log");
+    KVStore store("../data/wal.log" , "../data/snapshot.dat");
     Server server(store , 8080);
 
     server.run();

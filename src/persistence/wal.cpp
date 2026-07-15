@@ -46,7 +46,14 @@ void WAL:: replay(const std::function<void(const std:: string &op , const std:: 
     }
 }
 
+void WAL:: truncate(){
+    logFile_.close();
+    logFile_.open(filepath_ , std::ios::trunc);
 
+    if (!logFile_.is_open()){
+        std:: cerr << "Failed to truncate WAL file\n";
+    }
+}
 
 
 

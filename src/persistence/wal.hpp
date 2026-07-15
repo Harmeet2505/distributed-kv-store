@@ -13,7 +13,8 @@ class WAL {
 
         // Replay existing log on startup
         void replay(const std::function<void(const std:: string &op , const std:: string &key , const std:: string &value)> &callback);
-
+        void truncate();
+        
     private:
         std:: string filepath_;
         std:: ofstream logFile_;

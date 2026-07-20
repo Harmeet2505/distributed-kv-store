@@ -8,8 +8,8 @@
 #include<netinet/in.h>
 
 
-Server :: Server(KVStore &store ,uint16_t port) :
-    store_(store) , port_(port) , server_fd_(-1){}
+Server :: Server(KVStore &store ,uint16_t port , ReplicationManager* replicationManager) :
+    store_(store) , port_(port) , server_fd_(-1) , replicationManager_(replicationManager){}
 
 
 void Server:: run(){
@@ -91,6 +91,9 @@ std:: string Server:: processCommand(const std::string &line){
         std:: string value;
         iss >> value;
         store_.set(key , value);
+        if (replicationManager_){
+            replicationManager_->replicate("REPLICATE SET " + key +  " " + value);
+        }
         return "OK\n";
     }   
     else if (cmd == "GET"){
@@ -99,6 +102,9 @@ std:: string Server:: processCommand(const std::string &line){
     }
     else if (cmd == "DEL"){
         bool deleted = store_.del(key);
+        if (deleted && replicationManager_) {
+            replicationManager_->replicate("REPLICATE DEL " + key);
+        }
         return (deleted ? "OK\n" : "(nil)\n");
     }
     return "(nil)\n";

@@ -1,10 +1,11 @@
 #pragma once
 #include<cstdint>
 #include "../store/kv_store.hpp"
+#include "replication/replication_manager.hpp"
 
 class Server {
     public:
-        Server(KVStore &store , uint16_t port);
+        Server(KVStore &store , uint16_t port , ReplicationManager *replicationManager = nullptr);
         void run();
 
     private:
@@ -14,4 +15,5 @@ class Server {
         KVStore &store_;
         uint16_t port_;
         int server_fd_;
+        ReplicationManager* replicationManager_;
 };

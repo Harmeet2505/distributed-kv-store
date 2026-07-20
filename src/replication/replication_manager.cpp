@@ -45,6 +45,11 @@ void ReplicationManager::acceptLoop() {
         int followerFd = accept(serverFd_, nullptr, nullptr);
         if (followerFd < 0) continue;
 
+        struct timeval timeout;
+        timeout.tv_sec = 2;
+        timeout.tv_usec = 0;
+        setsockopt(followerFd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
         std::lock_guard<std::mutex> lock(followersMutex_);
         followerSockets_.push_back(followerFd);
         std::cout << "Follower connected\n";
@@ -60,17 +65,31 @@ void ReplicationManager::replicate(const std:: string &command){
     int ackNeeds = totalNodes_ / 2;
     int ackRecieved = 0;
     
+    std:: vector<int> stillConnected;
     for (int fd : followerSockets_){
-        send(fd ,msg.c_str() ,msg.size(), 0);
+        ssize_t sent = send(fd ,msg.c_str() ,msg.size(), 0);
+
+        if (sent <= 0){
+            std:: cerr << "Follower disconnected during send , removing\n";
+            close(fd);
+            continue;
+        }
+        stillConnected.push_back(fd);
     }
 
-    for (int fd : followerSockets_){
+    for (int fd : stillConnected){
         if (waitForAck(fd)){
             ackRecieved++;
             if (ackRecieved >= ackNeeds)
                 break;
         }
+        else {
+            std :: cerr << "Follower Disconnected or timed out waiting for ack , removing\n";
+            close(fd);
+            continue;
+        }
     } 
+    followerSockets_ = stillConnected;
 }
 
 bool ReplicationManager ::waitForAck(int followerFd){

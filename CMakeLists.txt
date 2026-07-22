@@ -22,9 +22,10 @@ add_executable(kvstore
     src/persistence/wal.cpp
     src/persistence/snapshot.cpp
     src/persistence/raft_state.cpp
-
 )
-
+add_executable(kv_client
+    src/client/kv_client.cpp
+)
 # Link the threading library
 target_link_libraries(kvstore PRIVATE Threads::Threads)
 

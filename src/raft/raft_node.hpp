@@ -50,8 +50,8 @@ public:
         bool hasElectionTimedOut();
 
         void sendHeartbeatsToAll();
-        bool sendAppendEntriesTo(const std::string& peerId, int fd);
         bool ensureConnected(PeerInfo& peer);
+        bool sendAppendEntriesTo(const std::string& peerId);
 
         void applyToStateMachine(int index);  
 

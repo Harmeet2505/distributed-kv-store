@@ -1,34 +1,35 @@
+#include "raft/raft_node.hpp"
 #include <iostream>
 #include <sstream>
 #include <thread>
 #include <cstring>
 #include <cstdlib>
+#include <algorithm>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include "raft/raft_node.hpp"
 
-RaftNode::RaftNode(const std::string& selfId, KVStore& store,const std::string& raftStatePath, int totalNodes)
+RaftNode::RaftNode(const std::string& selfId, KVStore& store,
+                    const std::string& raftStatePath, int totalNodes)
     : selfId_(selfId), store_(store), raftState_(raftStatePath), totalNodes_(totalNodes) {
     raftState_.load(currentTerm_, votedFor_);
 }
 
 void RaftNode::addPeer(const std::string& id, const std::string& ip, uint16_t port) {
-    PeerInfo p;
-    p.id = id;
-    p.ip = ip;
-    p.port = port;
+    PeerInfo p; p.id = id; p.ip = ip; p.port = port;
+    std::lock_guard<std::mutex> lock(mutex_);
     peers_[id] = p;
 }
 
 void RaftNode::start() {
     running_ = true;
-    resetElectionTimer();
+    { std::lock_guard<std::mutex> lock(mutex_); resetElectionTimer(); }
     std::thread(&RaftNode::electionTimerLoop, this).detach();
     std::thread(&RaftNode::connectionMaintenanceLoop, this).detach();
 }
 
+// Called only while holding mutex_
 void RaftNode::resetElectionTimer() {
     lastHeartbeat_ = std::chrono::steady_clock::now();
     electionTimeoutMs_ = 150 + (rand() % 150);
@@ -42,32 +43,33 @@ bool RaftNode::hasElectionTimedOut() {
 void RaftNode::electionTimerLoop() {
     while (running_) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (role_ != Role::LEADER && hasElectionTimedOut()) {
-            startElection();
+        bool shouldStart = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            shouldStart = (role_ != Role::LEADER && hasElectionTimedOut());
         }
+        if (shouldStart) startElection();
     }
 }
 
 bool RaftNode::ensureConnected(PeerInfo& peer) {
     if (peer.fd >= 0) return true;
-
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return false;
-
     struct timeval timeout{2, 0};
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(peer.port);
     inet_pton(AF_INET, peer.ip.c_str(), &addr.sin_addr);
-
     if (connect(fd, (sockaddr*)&addr, sizeof(addr)) < 0) {
         close(fd);
-        return false;
+        return false; 
     }
+    std::cerr << "[" << selfId_ << "] Connected to peer at " << peer.ip << ":" << peer.port << "\n";
+
+
     peer.fd = fd;
     return true;
 }
@@ -77,11 +79,9 @@ void RaftNode::connectionMaintenanceLoop() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             for (auto& [id, peer] : peers_) {
-                if (peer.fd < 0) {
-                    ensureConnected(peer);
-                }
+                if (peer.fd < 0) ensureConnected(peer);
             }
-        }
+        }  
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 }
@@ -92,7 +92,7 @@ static bool sendLine(int fd, const std::string& msg) {
 }
 
 static bool recvLine(int fd, std::string& line) {
-    char buffer[1024];
+    char buffer[4096];
     ssize_t n = recv(fd, buffer, sizeof(buffer) - 1, 0);
     if (n <= 0) return false;
     buffer[n] = '\0';
@@ -103,36 +103,57 @@ static bool recvLine(int fd, std::string& line) {
 }
 
 void RaftNode::startElection() {
-    currentTerm_++;
-    role_ = Role::CANDIDATE;
-    votedFor_ = selfId_;
-    raftState_.save(currentTerm_, votedFor_);
-    resetElectionTimer();
+    int term, lastLogIndex, lastLogTerm, votesNeeded;
+    std::vector<std::string> peerIds;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        currentTerm_++;
+        role_ = Role::CANDIDATE;
+        votedFor_ = selfId_;
+        raftState_.save(currentTerm_, votedFor_);
+        resetElectionTimer();
 
-    int term = currentTerm_;
+        term = currentTerm_;
+        lastLogIndex = (int)log_.size() - 1;
+        lastLogTerm = log_.empty() ? 0 : log_.back().term;
+        votesNeeded = (totalNodes_ / 2) + 1;
+        for (auto& [id, peer] : peers_) peerIds.push_back(id);
+
+        std::cout << "[" << selfId_ << "] Starting election for term " << term << "\n";
+    }
+
     int votesReceived = 1;
-    int votesNeeded = (totalNodes_ / 2) + 1;
+    std::string request = "REQUEST_VOTE " + std::to_string(term) + " " + selfId_ + " " + std::to_string(lastLogIndex) + " " + std::to_string(lastLogTerm);
 
-    int lastLogIndex = (int)log_.size() - 1;
-    int lastLogTerm = log_.empty() ? 0 : log_.back().term;
+    for (auto& peerId : peerIds) {
+        int fd = -1;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (role_ != Role::CANDIDATE || currentTerm_ != term) return;
+            auto it = peers_.find(peerId);
+            if (it == peers_.end()) continue;
+            if (!ensureConnected(it->second)) continue;
+            fd = it->second.fd;
+        }
 
-    std::cout << "[" << selfId_ << "] Starting election for term " << term << "\n";
-
-    for (auto& [peerId, peer] : peers_) {
-        if (peer.fd < 0 && !ensureConnected(peer)) continue;
-
-        std::string request = "REQUEST_VOTE " + std::to_string(term) + " " + selfId_ +
-                            " " + std::to_string(lastLogIndex) + " " + std::to_string(lastLogTerm);
-        if (!sendLine(peer.fd, request)) { close(peer.fd); peer.fd = -1; continue; }
-
+        bool ok = sendLine(fd, request);
         std::string response;
-        if (!recvLine(peer.fd, response)) { close(peer.fd); peer.fd = -1; continue; }
+        if (ok) ok = recvLine(fd, response);
+
+        if (!ok) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            close(fd);
+            if (peers_.count(peerId)) peers_[peerId].fd = -1;
+            continue;
+        }
 
         std::istringstream iss(response);
         std::string verdict;
-        int responseTerm;
+        int responseTerm = 0;
         iss >> verdict >> responseTerm;
+        std::cerr << "[" << selfId_ << "] Got response from " << peerId << ": " << verdict << " term=" << responseTerm << "\n";
 
+        std::lock_guard<std::mutex> lock(mutex_);
         if (responseTerm > currentTerm_) {
             stepDown(responseTerm);
             return;
@@ -164,72 +185,85 @@ void RaftNode::becomeLeader() {
         nextIndex_[peerId] = nextIdx;
         matchIndex_[peerId] = -1;
     }
-    sendHeartbeatsToAll();
     std::thread(&RaftNode::leaderHeartbeatLoop, this).detach();
 }
 
 void RaftNode::leaderHeartbeatLoop() {
     while (running_) {
+        bool stillLeader;
+        std::vector<std::string> peerIds;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (role_ != Role::LEADER) return;
-            sendHeartbeatsToAll();
+            stillLeader = (role_ == Role::LEADER);
+            if (stillLeader) for (auto& [id, peer] : peers_) peerIds.push_back(id);
+        }
+        if (!stillLeader) return;
+
+        for (auto& peerId : peerIds) {
+            sendAppendEntriesTo(peerId);  
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 }
 
-void RaftNode::sendHeartbeatsToAll() {
-    for (auto& [peerId, peer] : peers_) {
-        if (peer.fd < 0 && !ensureConnected(peer)) continue;
-        sendAppendEntriesTo(peerId, peer.fd);
-    }
-}
+bool RaftNode::sendAppendEntriesTo(const std::string& peerId) {
+    int fd, term, prevLogIndex, prevLogTerm, leaderCommit;
+    std::vector<LogEntry> entries;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (role_ != Role::LEADER) return false;
+        auto it = peers_.find(peerId);
+        if (it == peers_.end()) return false;
+        if (!ensureConnected(it->second)) return false;
+        fd = it->second.fd;
 
-bool RaftNode::sendAppendEntriesTo(const std::string& peerId, int fd) {
-    int nextIdx = nextIndex_[peerId];
-    int prevLogIndex = nextIdx - 1;
-    int prevLogTerm = (prevLogIndex >= 0 && prevLogIndex < (int)log_.size()) ? log_[prevLogIndex].term : 0;
+        term = currentTerm_;
+        int nextIdx = nextIndex_[peerId];
+        prevLogIndex = nextIdx - 1;
+        prevLogTerm = (prevLogIndex >= 0 && prevLogIndex < (int)log_.size()) ? log_[prevLogIndex].term : 0;
+        leaderCommit = commitIndex_;
+        for (int i = nextIdx; i < (int)log_.size(); i++) entries.push_back(log_[i]);
+    }
 
     std::ostringstream oss;
-    oss << "APPEND_ENTRIES " << currentTerm_ << " " << selfId_ << " "
-        << prevLogIndex << " " << prevLogTerm << " " << commitIndex_ << " ";
-
-    int entryCount = (int)log_.size() - nextIdx;
-    if (entryCount < 0) entryCount = 0;
-    oss << entryCount;
-
-    for (int i = nextIdx; i < (int)log_.size(); i++) {
-        std::string encodedCommand = log_[i].command;
-        std::replace(encodedCommand.begin(), encodedCommand.end(), ' ', '~');
-        oss << " |" << log_[i].term << "|" << encodedCommand;
+    oss << "APPEND_ENTRIES " << term << " " << selfId_ << " "
+        << prevLogIndex << " " << prevLogTerm << " " << leaderCommit << " " << entries.size();
+    for (auto& e : entries) {
+        std::string encoded = e.command;
+        std::replace(encoded.begin(), encoded.end(), ' ', '~');
+        oss << " |" << e.term << "|" << encoded;
     }
 
-    if (!sendLine(fd, oss.str())) { close(fd); peers_[peerId].fd = -1; return false; }
-
+    bool ok = sendLine(fd, oss.str());
     std::string response;
-    if (!recvLine(fd, response)) { close(fd); peers_[peerId].fd = -1; return false; }
+    if (ok) ok = recvLine(fd, response);
 
-    std::istringstream iss(response);
-    std::string verdict;
-    int responseTerm;
-    iss >> verdict >> responseTerm;
-
-    if (responseTerm > currentTerm_) {
-        stepDown(responseTerm);
+    if (!ok) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        close(fd);
+        if (peers_.count(peerId)) peers_[peerId].fd = -1;
         return false;
     }
 
+    std::istringstream iss(response);
+    std::string verdict;
+    int responseTerm = 0;
+    iss >> verdict >> responseTerm;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (responseTerm > currentTerm_) { stepDown(responseTerm); return false; }
+    if (currentTerm_ != term || role_ != Role::LEADER) return false;
+
     if (verdict == "APPEND_SUCCESS") {
-        matchIndex_[peerId] = (int)log_.size() - 1;
-        nextIndex_[peerId] = (int)log_.size();
+        matchIndex_[peerId] = prevLogIndex + (int)entries.size();
+        nextIndex_[peerId] = matchIndex_[peerId] + 1;
 
         std::vector<int> matches;
-        matches.push_back((int)log_.size() - 1);  // leader itself
+        matches.push_back((int)log_.size() - 1);
         for (auto& [id, idx] : matchIndex_) matches.push_back(idx);
         std::sort(matches.begin(), matches.end(), std::greater<int>());
         int majorityMatch = matches[totalNodes_ / 2];
-        if (majorityMatch > commitIndex_ && majorityMatch >= 0 &&
+        if (majorityMatch > commitIndex_ && majorityMatch >= 0 && majorityMatch < (int)log_.size() &&
             log_[majorityMatch].term == currentTerm_) {
             commitIndex_ = majorityMatch;
             while (lastApplied_ < commitIndex_) {
@@ -255,7 +289,7 @@ bool RaftNode::clientSet(const std::string& key, const std::string& value) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (role_ != Role::LEADER) return false;
     log_.push_back({currentTerm_, "SET " + key + " " + value});
-    return true;  
+    return true;
 }
 
 bool RaftNode::clientDel(const std::string& key) {
@@ -267,13 +301,8 @@ bool RaftNode::clientDel(const std::string& key) {
 
 std::string RaftNode::handleRequestVote(int term, const std::string& candidateId,int lastLogIndex, int lastLogTerm) {
     std::lock_guard<std::mutex> lock(mutex_);
-
-    if (term < currentTerm_) {
-        return "VOTE_DENIED " + std::to_string(currentTerm_);
-    }
-    if (term > currentTerm_) {
-        stepDown(term);
-    }
+    if (term < currentTerm_) return "VOTE_DENIED " + std::to_string(currentTerm_);
+    if (term > currentTerm_) stepDown(term);
 
     bool canVote = (votedFor_.empty() || votedFor_ == candidateId);
     int myLastLogIndex = (int)log_.size() - 1;
@@ -289,20 +318,15 @@ std::string RaftNode::handleRequestVote(int term, const std::string& candidateId
     return "VOTE_DENIED " + std::to_string(currentTerm_);
 }
 
-std::string RaftNode::handleAppendEntries(int term, const std::string& leaderId,
-                                        int prevLogIndex, int prevLogTerm,
-                                        const std::vector<LogEntry>& entries,
-                                        int leaderCommit) {
+std::string RaftNode::handleAppendEntries(int term, const std::string& leaderId,int prevLogIndex, int prevLogTerm,
+                                    const std::vector<LogEntry>& entries,
+                                    int leaderCommit) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (term < currentTerm_) return "APPEND_FAIL " + std::to_string(currentTerm_);
 
-    if (term < currentTerm_) {
-        return "APPEND_FAIL " + std::to_string(currentTerm_);
-    }
-    if (term >= currentTerm_) {
-        currentTerm_ = term;
-        role_ = Role::FOLLOWER;
-        resetElectionTimer();
-    }
+    currentTerm_ = term;
+    role_ = Role::FOLLOWER;
+    resetElectionTimer();
 
     if (prevLogIndex >= 0) {
         if (prevLogIndex >= (int)log_.size() || log_[prevLogIndex].term != prevLogTerm) {
@@ -313,10 +337,7 @@ std::string RaftNode::handleAppendEntries(int term, const std::string& leaderId,
     int idx = prevLogIndex + 1;
     for (auto& entry : entries) {
         if (idx < (int)log_.size()) {
-            if (log_[idx].term != entry.term) {
-                log_.resize(idx);
-                log_.push_back(entry);
-            }
+            if (log_[idx].term != entry.term) { log_.resize(idx); log_.push_back(entry); }
         } else {
             log_.push_back(entry);
         }
@@ -330,6 +351,5 @@ std::string RaftNode::handleAppendEntries(int term, const std::string& leaderId,
             applyToStateMachine(lastApplied_);
         }
     }
-
     return "APPEND_SUCCESS " + std::to_string(currentTerm_);
 }

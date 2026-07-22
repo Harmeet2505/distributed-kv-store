@@ -8,8 +8,8 @@
 #include<netinet/in.h>
 
 
-Server :: Server(KVStore &store ,uint16_t port , ReplicationManager* replicationManager) :
-    store_(store) , port_(port) , server_fd_(-1) , replicationManager_(replicationManager){}
+Server :: Server(KVStore &store ,uint16_t port , ReplicationManager* replicationManager , RaftNode *raftNode) :
+    store_(store) , port_(port) , server_fd_(-1) , replicationManager_(replicationManager) , raftNode_(raftNode){}
 
 
 void Server:: run(){
@@ -80,33 +80,41 @@ void Server:: handleClient(int client_fd){
     close(client_fd);
 }
 
-
-std:: string Server:: processCommand(const std::string &line){
-    std:: istringstream iss(line);
-    std:: string cmd , key;
-
+std::string Server::processCommand(const std::string& line) {
+    std::istringstream iss(line);
+    std::string cmd, key, value;
     iss >> cmd >> key;
-    
-    if (cmd == "SET"){
-        std:: string value;
-        iss >> value;
-        store_.set(key , value);
-        if (replicationManager_){
-            replicationManager_->replicate("REPLICATE SET " + key +  " " + value);
+
+    if (raftNode_) {
+        if (!raftNode_->isLeader()) {
+            return "ERROR not leader\n";
         }
-        return "OK\n";
-    }   
-    else if (cmd == "GET"){
-        std:: string val = store_.get(key);
-        return((!val.size()) ?"(nil)\n" : val + '\n');
+        if (cmd == "SET") {
+            iss >> value;
+            raftNode_->clientSet(key, value);
+            return "OK\n";
+        } else if (cmd == "GET") {
+            std::string val = store_.get(key);
+            return (val.empty() ? "(nil)\n" : val + "\n");
+        } else if (cmd == "DEL") {
+            raftNode_->clientDel(key);
+            return "OK\n";
+        }
+        return "ERROR unknown command\n";
     }
-    else if (cmd == "DEL"){
+
+    if (cmd == "SET") {
+        iss >> value;
+        store_.set(key, value);
+        if (replicationManager_) replicationManager_->replicate("REPLICATE SET " + key + " " + value);
+        return "OK\n";
+    } else if (cmd == "GET") {
+        std::string val = store_.get(key);
+        return (val.empty() ? "(nil)\n" : val + "\n");
+    } else if (cmd == "DEL") {
         bool deleted = store_.del(key);
-        if (deleted && replicationManager_) {
-            replicationManager_->replicate("REPLICATE DEL " + key);
-        }
+        if (deleted && replicationManager_) replicationManager_->replicate("REPLICATE DEL " + key);
         return (deleted ? "OK\n" : "(nil)\n");
     }
-    return "(nil)\n";
-
+    return "ERROR unknown command\n";
 }

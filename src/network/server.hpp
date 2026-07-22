@@ -2,10 +2,12 @@
 #include<cstdint>
 #include "../store/kv_store.hpp"
 #include "replication/replication_manager.hpp"
+#include "raft/raft_node.hpp"
 
 class Server {
     public:
-        Server(KVStore &store , uint16_t port , ReplicationManager *replicationManager = nullptr);
+        Server(KVStore &store , uint16_t port , ReplicationManager *replicationManager = nullptr ,
+        RaftNode *raftNode = nullptr);
         void run();
 
     private:
@@ -16,4 +18,5 @@ class Server {
         uint16_t port_;
         int server_fd_;
         ReplicationManager* replicationManager_;
+        RaftNode* raftNode_;
 };

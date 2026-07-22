@@ -17,8 +17,11 @@ add_executable(kvstore
     src/network/server.cpp
     src/replication/replication_manager.cpp
     src/network/follower_connector.cpp
+    src/network/raft_server.cpp
+    src/raft/raft_node.cpp
     src/persistence/wal.cpp
     src/persistence/snapshot.cpp
+    src/persistence/raft_state.cpp
 
 )
 

@@ -10,7 +10,7 @@ void Snapshot:: save(const std:: unordered_map<std:: string ,std:: string> &data
     
     std:: ofstream tempFile(tempPath , std:: ios:: trunc);
     if (!tempFile.is_open()){
-        std:: cerr << "Failed to open temp sanpshot\n";
+        std:: cerr << "Failed to open temp snapshot\n";
         return;
     }
 

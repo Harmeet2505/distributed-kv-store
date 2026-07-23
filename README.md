@@ -4,6 +4,8 @@ A distributed, fault-tolerant key-value store built from scratch in C++ — impl
 
 Built to understand, hands-on, how systems like Redis, etcd, and CockroachDB actually work underneath their APIs — not to replace them.
 
+![Demo: client connects, writes/reads data, leader is killed mid-session, client automatically fails over to the new leader with no data loss](assets/kv_demo.gif)
+
 ## Why this exists
 
 I use key-value stores and distributed databases constantly as a developer, but only ever at the `GET`/`SET` level — a black box underneath. This project was built to open that box: implement the actual mechanics of durability, replication, and consensus myself, and hit the real edge cases (race conditions, split-brain, log divergence, partial network failures) that theory alone glosses over.

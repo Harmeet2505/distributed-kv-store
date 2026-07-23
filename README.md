@@ -53,23 +53,30 @@ The project was built incrementally, each phase adding one layer of the "what ha
 
 ## Running a 3-node cluster locally
 
+Build first:
 ```bash
-mkdir -p build data && cd build && cmake .. && make
+mkdir -p build data
+cd build && cmake .. && make
+cd ..
+```
 
+**Important:** run every command below from the project root (not from inside `build/`) — the WAL/snapshot/raft-state file paths are relative to the current directory, so running from `build/` will cause "failed to open WAL file" errors.
+
+```bash
 # Terminal 1
-./bin/kvstore --node-id=node1 --client-port=9090 --raft-port=9190 --total-nodes=3 --peers=node2:127.0.0.1:9191,node3:127.0.0.1:9192
+./build/bin/kvstore --node-id=node1 --client-port=9090 --raft-port=9190 --total-nodes=3 --peers=node2:127.0.0.1:9191,node3:127.0.0.1:9192
 
 # Terminal 2
-./bin/kvstore --node-id=node2 --client-port=9091 --raft-port=9191 --total-nodes=3 --peers=node1:127.0.0.1:9190,node3:127.0.0.1:9192
+./build/bin/kvstore --node-id=node2 --client-port=9091 --raft-port=9191 --total-nodes=3 --peers=node1:127.0.0.1:9190,node3:127.0.0.1:9192
 
 # Terminal 3
-./bin/kvstore --node-id=node3 --client-port=9092 --raft-port=9192 --total-nodes=3 --peers=node1:127.0.0.1:9190,node2:127.0.0.1:9191
+./build/bin/kvstore --node-id=node3 --client-port=9092 --raft-port=9192 --total-nodes=3 --peers=node1:127.0.0.1:9190,node2:127.0.0.1:9191
 ```
 
 One node will print `Became leader` within a few hundred milliseconds. Connect with the included client, which automatically finds and follows the current leader:
 
 ```bash
-./bin/kv_client 127.0.0.1:9090,127.0.0.1:9091,127.0.0.1:9092
+./build/bin/kv_client 127.0.0.1:9090,127.0.0.1:9091,127.0.0.1:9092
 SET name harmeet
 GET name
 ```

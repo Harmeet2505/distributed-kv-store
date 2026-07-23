@@ -97,8 +97,8 @@ std::string Server::processCommand(const std::string& line) {
             std::string val = store_.get(key);
             return (val.empty() ? "(nil)\n" : val + "\n");
         } else if (cmd == "DEL") {
-            raftNode_->clientDel(key);
-            return "OK\n";
+            bool committed = raftNode_->clientDel(key);
+            return committed ? "OK\n" : "Error failed to commit\n";
         }
         return "ERROR unknown command\n";
     }
@@ -106,6 +106,8 @@ std::string Server::processCommand(const std::string& line) {
     if (cmd == "SET") {
         iss >> value;
         store_.set(key, value);
+        raftNode_->clientSet(key, value);
+
         if (replicationManager_) replicationManager_->replicate("REPLICATE SET " + key + " " + value);
         return "OK\n";
     } else if (cmd == "GET") {

@@ -7,6 +7,8 @@
 #include <mutex>
 #include <chrono>
 #include <atomic>
+#include <map>
+
 
 enum class Role { FOLLOWER, CANDIDATE, LEADER };
 
@@ -42,6 +44,7 @@ public:
         void electionTimerLoop();
         void leaderHeartbeatLoop();
         void connectionMaintenanceLoop(); 
+        
 
         void startElection();
         void stepDown(int newTerm);
@@ -73,6 +76,7 @@ public:
         std::unordered_map<std::string, int> nextIndex_;
         std::unordered_map<std::string, int> matchIndex_;
         std::unordered_map<std::string, PeerInfo> peers_;
+        std::unordered_map<std::string, std::unique_ptr<std::mutex>> peerSendMutexes_;
 
         std::chrono::steady_clock::time_point lastHeartbeat_;
         int electionTimeoutMs_ = 150;

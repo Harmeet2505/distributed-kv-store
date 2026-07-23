@@ -20,6 +20,7 @@ void RaftNode::addPeer(const std::string& id, const std::string& ip, uint16_t po
     PeerInfo p; p.id = id; p.ip = ip; p.port = port;
     std::lock_guard<std::mutex> lock(mutex_);
     peers_[id] = p;
+    peerSendMutexes_[id] = std::make_unique<std::mutex>();
 }
 
 void RaftNode::start() {
@@ -207,6 +208,15 @@ void RaftNode::leaderHeartbeatLoop() {
 }
 
 bool RaftNode::sendAppendEntriesTo(const std::string& peerId) {
+    std::mutex* peerLock;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (peerSendMutexes_.find(peerId) == peerSendMutexes_.end()) return false;
+        peerLock = peerSendMutexes_[peerId].get();
+    }
+
+    std::lock_guard<std::mutex> sendLock(*peerLock); 
+
     int fd, term, prevLogIndex, prevLogTerm, leaderCommit;
     std::vector<LogEntry> entries;
     {
@@ -284,19 +294,58 @@ void RaftNode::applyToStateMachine(int index) {
     if (op == "SET") { iss >> value; store_.set(key, value); }
     else if (op == "DEL") { store_.del(key); }
 }
-
 bool RaftNode::clientSet(const std::string& key, const std::string& value) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (role_ != Role::LEADER) return false;
-    log_.push_back({currentTerm_, "SET " + key + " " + value});
-    return true;
+    int logIndex;
+    std::vector<std::string> peerIds;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (role_ != Role::LEADER) return false;
+        log_.push_back({currentTerm_, "SET " + key + " " + value});
+        logIndex = (int)log_.size() - 1;
+        for (auto& [id, peer] : peers_) peerIds.push_back(id);
+    }
+
+    for (auto& peerId : peerIds) {
+        sendAppendEntriesTo(peerId);
+    }
+
+    auto start = std::chrono::steady_clock::now();
+    while (true) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (commitIndex_ >= logIndex) return true;
+            if (role_ != Role::LEADER) return false;
+        }
+        if (std::chrono::steady_clock::now() - start > std::chrono::seconds(2)) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));  // tighter poll now that we're not heartbeat-bound
+    }
 }
 
 bool RaftNode::clientDel(const std::string& key) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (role_ != Role::LEADER) return false;
-    log_.push_back({currentTerm_, "DEL " + key});
-    return true;
+    int logIndex;
+    std::vector<std::string> peerIds;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (role_ != Role::LEADER) return false;
+        log_.push_back({currentTerm_, "DEL " + key});
+        logIndex = (int)log_.size() - 1;
+        for (auto& [id, peer] : peers_) peerIds.push_back(id);
+    }
+
+    for (auto& peerId : peerIds) {
+        sendAppendEntriesTo(peerId);
+    }
+
+    auto start = std::chrono::steady_clock::now();
+    while (true) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (commitIndex_ >= logIndex) return true;
+            if (role_ != Role::LEADER) return false;
+        }
+        if (std::chrono::steady_clock::now() - start > std::chrono::seconds(2)) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 
 std::string RaftNode::handleRequestVote(int term, const std::string& candidateId,int lastLogIndex, int lastLogTerm) {
